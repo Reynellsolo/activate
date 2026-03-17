@@ -215,7 +215,24 @@ refreshCsrf();
       if (!TOKEN) { setStatus("err", "Ссылка недействительна. Напишите в поддержку."); return; }
       if (!auth_json) { setStatus("err", "Вставьте данные в поле."); return; }
 
-      if (!csrfReady) { setStatus("err", "Подождите секунду, идёт инициализация..."); return; }
+      if (!csrfReady) {
+        setStatus("wait", "⏳ Инициализация защиты... Подождите пару секунд.");
+        btn.disabled = true;
+
+        for (let attempt = 0; attempt < 3 && !csrfReady; attempt++) {
+          await refreshCsrf();
+          if (!csrfReady) {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+        }
+
+        btn.disabled = false;
+
+        if (!csrfReady) {
+          setStatus("err", "Ошибка инициализации. Обновите страницу (Ctrl+F5) или напишите в поддержку.");
+          return;
+        }
+      }
 
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner"></span>Подключение…';

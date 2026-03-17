@@ -380,7 +380,7 @@
     const orderId = rawOrderId.trim();
 
     let attempts = 0;
-    const maxAttempts = 180;
+    const maxAttempts = 60;
     let checkTimeout = null;
     let waitingInterval = null;
     let stopped = false;
@@ -521,14 +521,16 @@
           return;
         }
 
-        checkTimeout = setTimeout(checkStatus, 2000);
+        const delay = attempts < 30 ? 2000 : 4000;
+        checkTimeout = setTimeout(checkStatus, delay);
       } catch (e) {
         console.error('checkStatus error:', e);
 
         if (attempts >= maxAttempts) {
           showWaiting();
         } else {
-          checkTimeout = setTimeout(checkStatus, 2000);
+          const delay = attempts < 30 ? 2000 : 4000;
+          checkTimeout = setTimeout(checkStatus, delay);
         }
       }
     }
@@ -587,7 +589,8 @@
       showError();
     } else {
       showOrderId();
-      checkStatus();
+      // Даём webhook время дойти до сервера после редиректа
+      checkTimeout = setTimeout(checkStatus, 3000);
     }
   </script>
 </body>

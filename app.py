@@ -370,14 +370,25 @@ async def mark_order_paid_once(order_id: str, product: str):
     async with database.transaction():
         try:
             row = await database.fetch_one(
-                "SELECT status, activation_token, user_id, amount, referral_code, promo_code_used FROM orders WHERE order_id=:oid FOR UPDATE",
+                """
+                SELECT status, activation_token, user_id, amount,
+                       COALESCE(referral_code, promo_code_used) AS referral_code
+                FROM orders
+                WHERE order_id=:oid
+                FOR UPDATE
+                """,
                 values={"oid": order_id}
             )
-        except Exception:
-            row = await database.fetch_one(
-                "SELECT status, activation_token FROM orders WHERE order_id=:oid FOR UPDATE",
-                values={"oid": order_id}
-            )
+        except Exception as e:
+            logging.warning(f"Full SELECT failed for order {order_id}, trying minimal: {e}")
+            try:
+                row = await database.fetch_one(
+                    "SELECT status, activation_token FROM orders WHERE order_id=:oid FOR UPDATE",
+                    values={"oid": order_id}
+                )
+            except Exception as e2:
+                logging.error(f"Even minimal SELECT failed for order {order_id}: {e2}")
+                return None
 
         if not row:
             return None
@@ -390,7 +401,7 @@ async def mark_order_paid_once(order_id: str, product: str):
         # Keep referral attribution from the first locked read to avoid edge races.
         referral_user_id = row.get("user_id")
         referral_amount = row.get("amount")
-        referral_code = row.get("referral_code") or row.get("promo_code_used")
+        referral_code = row.get("referral_code")
 
         token = row.get("activation_token")
         if not token:

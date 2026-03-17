@@ -698,11 +698,13 @@
       if (!selectedBtn.dataset.text) selectedBtn.dataset.text = selectedBtn.textContent;
       if (typeof ym !== 'undefined') ym(YM_ID, 'reachGoal', 'open_payment_modal', { product });
       document.getElementById('payModal').style.display = 'block';
+      document.body.style.overflow = 'hidden';
       setTimeout(() => { const firstBtn = document.querySelector('#payModal .btn'); if (firstBtn) firstBtn.focus(); }, 100);
     }
 
     function closePayModal() {
       document.getElementById('payModal').style.display = 'none';
+      document.body.style.overflow = '';
       selectedProduct = null;
       selectedBtn = null;
       checkoutStarted = false;

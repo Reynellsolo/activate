@@ -1468,7 +1468,12 @@
       ];
       const [meRes,walletRes,refsRes,ordersRes,withdrawsRes,txRes] = await Promise.allSettled(reqs);
       try{
-        if (meRes.status === 'rejected' && meRes.reason && meRes.reason.message === 'UNAUTH') return out();
+        const allResults = [meRes, walletRes, refsRes, ordersRes, withdrawsRes, txRes];
+        const unauthCount = allResults.filter(
+          r => r.status === 'rejected' && r.reason && r.reason.message === 'UNAUTH'
+        ).length;
+        const meIsUnauth = meRes.status === 'rejected' && meRes.reason && meRes.reason.message === 'UNAUTH';
+        if (meIsUnauth || unauthCount >= 2) return out();
 
         let hasFailed = false;
 

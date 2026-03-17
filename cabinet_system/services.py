@@ -279,7 +279,7 @@ async def process_referral_bonus(database: Database, user_id: int, order_amount:
     meta = json.dumps({"order_id": order_id, "referral_id": referral_id_for_meta}, ensure_ascii=False)
 
     async with database.transaction():
-        inserted = await database.execute(
+        row = await database.fetch_one(
             """
             INSERT INTO wallet_transactions(user_id, tx_type, amount, referral_order_id, meta_json)
             VALUES(:uid, 'referral_bonus', :amount, :oid, :meta)
@@ -288,8 +288,11 @@ async def process_referral_bonus(database: Database, user_id: int, order_amount:
             """,
             values={"uid": referrer_id, "amount": bonus, "oid": order_id, "meta": meta},
         )
-        if not inserted:
+        if not row:
+            logging.debug(f"Referral bonus for order {order_id} already exists, skipping")
             return 0
+
+        logging.info(f"Referral bonus {bonus} credited to user {referrer_id} for order {order_id}")
 
         await database.execute(
             "UPDATE users SET balance = balance + :amount WHERE id=:uid",
