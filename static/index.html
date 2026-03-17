@@ -698,11 +698,13 @@
       if (!selectedBtn.dataset.text) selectedBtn.dataset.text = selectedBtn.textContent;
       if (typeof ym !== 'undefined') ym(YM_ID, 'reachGoal', 'open_payment_modal', { product });
       document.getElementById('payModal').style.display = 'block';
+      document.body.style.overflow = 'hidden';
       setTimeout(() => { const firstBtn = document.querySelector('#payModal .btn'); if (firstBtn) firstBtn.focus(); }, 100);
     }
 
     function closePayModal() {
       document.getElementById('payModal').style.display = 'none';
+      document.body.style.overflow = '';
       selectedProduct = null;
       selectedBtn = null;
       checkoutStarted = false;
@@ -721,6 +723,13 @@
 
     async function payWith(method) {
       if (!selectedProduct) { showToast('⚠️ Не выбран тариф.'); return; }
+
+      const csrfOk = await waitForCsrfReady(5000);
+      if (!csrfOk || !window.__csrfToken) {
+        showToast('⚠️ Ошибка инициализации защиты. Обновите страницу.');
+        return;
+      }
+
       const product = selectedProduct;
       const btn = selectedBtn;
       const originalText = btn?.dataset.text || 'Оформить';
@@ -1001,15 +1010,40 @@
     
     
     window.__csrfToken = '';
-    (async function initCsrf() {
+    window.__csrfReady = false;
+    const csrfInitPromise = (async function initCsrf() {
       try {
         const r = await fetch('/cabinet/csrf-token', { credentials: 'include' });
         const data = await r.json().catch(() => ({}));
-        if (data && data.csrf_token) window.__csrfToken = data.csrf_token;
+        if (data && data.csrf_token) {
+          window.__csrfToken = data.csrf_token;
+          window.__csrfReady = true;
+        }
       } catch (e) {
         console.warn('Failed to init CSRF token:', e);
       }
     })();
+
+    async function waitForCsrfReady(timeoutMs = 5000) {
+      if (window.__csrfReady && window.__csrfToken) return true;
+
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (window.__csrfReady && window.__csrfToken) return true;
+
+        try {
+          await csrfInitPromise;
+        } catch (e) {
+          console.warn('CSRF init promise failed:', e);
+          break;
+        }
+
+        if (window.__csrfReady && window.__csrfToken) return true;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      return !!(window.__csrfReady && window.__csrfToken);
+    }
 
     function getCsrfToken() {
       return window.__csrfToken || '';

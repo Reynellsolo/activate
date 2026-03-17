@@ -134,6 +134,51 @@ def verify_antilopay_callback(body: bytes, signature: str) -> bool:
         logging.error(f"Antilopay callback verification failed: {e}")
         return False
 
+
+
+async def check_antilopay_payment_status(payment_id: str):
+    """Проверяет статус платежа в Antilopay и безопасно парсит ответ."""
+    if not payment_id or not ANTILOPAY_SECRET_ID:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                "https://lk.antilopay.com/api/v1/payment/status",
+                params={"payment_id": payment_id},
+                headers={
+                    "X-Apay-Secret-Id": ANTILOPAY_SECRET_ID,
+                    "User-Agent": "Mozilla/5.0 (compatible; CodeNext/1.0)",
+                    "Accept": "application/json",
+                },
+                follow_redirects=True,
+            )
+
+        if resp.status_code != 200:
+            logging.error(f"Antilopay status HTTP {resp.status_code} for payment_id={payment_id}: {resp.text[:300]}")
+            return None
+
+        body_text = (resp.text or "").strip()
+        content_type = (resp.headers.get("content-type") or "").lower()
+        if not body_text:
+            logging.error(f"Antilopay status EMPTY body for payment_id={payment_id}")
+            return None
+        if "text/html" in content_type or body_text.startswith("<!") or body_text.startswith("<html"):
+            logging.error(f"Antilopay status HTML body for payment_id={payment_id}: {body_text[:200]}")
+            return None
+
+        try:
+            return resp.json()
+        except Exception as e:
+            logging.error(f"Antilopay status JSON parse error for payment_id={payment_id}: {e}, body={body_text[:200]}")
+            return None
+    except httpx.TimeoutException:
+        logging.error(f"Antilopay status timeout for payment_id={payment_id}")
+        return None
+    except Exception as e:
+        logging.error(f"Antilopay status error for payment_id={payment_id}: {e}")
+        return None
+
 # ================== Pydantic ==================
 class CreatePaymentRequest(BaseModel):
     product: str = Field(..., max_length=50)
@@ -155,6 +200,36 @@ class CreatePaymentRequest(BaseModel):
         return v
 
 # ================== STARTUP / SHUTDOWN ==================
+
+async def verify_critical_indexes(db: Database):
+    """Проверяет наличие критических индексов и пишет CRITICAL при отсутствии."""
+    critical = [
+        (
+            "uq_wallet_referral_bonus_order",
+            "UNIQUE INDEX для защиты от двойных реферальных бонусов",
+        ),
+    ]
+
+    for idx_name, description in critical:
+        try:
+            row = await db.fetch_one(
+                "SELECT 1 FROM pg_indexes WHERE indexname=:name",
+                values={"name": idx_name},
+            )
+        except Exception as e:
+            logging.critical(
+                f"CRITICAL INDEX CHECK FAILED for {idx_name}: {e}. "
+                "Unable to verify referral dedup protection."
+            )
+            continue
+
+        if not row:
+            logging.critical(
+                f"CRITICAL INDEX MISSING: {idx_name} ({description}). "
+                "Referral dedup protection is DISABLED!"
+            )
+
+
 async def periodic_cleanup():
     while True:
         await asyncio.sleep(3600)
@@ -177,6 +252,8 @@ async def startup():
         await cleanup_expired_cabinet_data(database)
     except Exception as e:
         logging.error(f"Cabinet schema init failed: {e}")
+
+    await verify_critical_indexes(database)
     _cleanup_task = asyncio.create_task(periodic_cleanup())
 
 @app.on_event("shutdown")
@@ -338,14 +415,25 @@ async def mark_order_paid_once(order_id: str, product: str):
     async with database.transaction():
         try:
             row = await database.fetch_one(
-                "SELECT status, activation_token, user_id, amount, referral_code, promo_code_used FROM orders WHERE order_id=:oid FOR UPDATE",
+                """
+                SELECT status, activation_token, user_id, amount,
+                       COALESCE(referral_code, promo_code_used::text) AS referral_code
+                FROM orders
+                WHERE order_id=:oid
+                FOR UPDATE
+                """,
                 values={"oid": order_id}
             )
-        except Exception:
-            row = await database.fetch_one(
-                "SELECT status, activation_token FROM orders WHERE order_id=:oid FOR UPDATE",
-                values={"oid": order_id}
-            )
+        except Exception as e:
+            logging.warning(f"Full SELECT failed for order {order_id}, trying minimal: {e}")
+            try:
+                row = await database.fetch_one(
+                    "SELECT status, activation_token FROM orders WHERE order_id=:oid FOR UPDATE",
+                    values={"oid": order_id}
+                )
+            except Exception as e2:
+                logging.error(f"Even minimal SELECT failed for order {order_id}: {e2}")
+                return None
 
         if not row:
             return None
@@ -358,7 +446,7 @@ async def mark_order_paid_once(order_id: str, product: str):
         # Keep referral attribution from the first locked read to avoid edge races.
         referral_user_id = row.get("user_id")
         referral_amount = row.get("amount")
-        referral_code = row.get("referral_code") or row.get("promo_code_used")
+        referral_code = row.get("referral_code")
 
         token = row.get("activation_token")
         if not token:
@@ -698,7 +786,7 @@ async def create_payment(request: Request, payload: CreatePaymentRequest):
         return no_store_json({"payment_url": res_json.get("redirect"), "order_id": order_id})
 
 @app.get("/api/check-order/{order_id}")
-@limiter.limit("20/minute")
+@limiter.limit("60/minute")
 async def check_order(request: Request, order_id: str):
     if not UUID_RE.match(order_id):
         return no_store_json({"error": "bad order_id"}, status_code=400)
@@ -716,8 +804,16 @@ async def check_order(request: Request, order_id: str):
 
     res = dict(res)
 
-    if res['status'] == 'paid' and res['activation_token']:
-        return no_store_json({"status": "paid", "link": f"/l/{res['activation_token']}"})
+    if res['status'] == 'paid':
+        if res['activation_token']:
+            return no_store_json({"status": "paid", "link": f"/l/{res['activation_token']}"})
+
+        token = await mark_order_paid_once(order_id, res['product'])
+        if token:
+            return no_store_json({"status": "paid", "link": f"/l/{token}"})
+
+        logging.error(f"Paid order without activation token in check_order: {order_id}")
+        return no_store_json({"status": "pending"})
 
     created_at = res.get('created_at')
     if created_at and res['status'] in ['created', 'pending']:
@@ -733,19 +829,11 @@ async def check_order(request: Request, order_id: str):
 
             if tx_id:
                 if provider == "antilopay":
-                    try:
-                        async with httpx.AsyncClient(timeout=10) as client:
-                            resp = await client.get(
-                                f"https://lk.antilopay.com/api/v1/payment/status?payment_id={tx_id}",
-                                headers={"X-Apay-Secret-Id": ANTILOPAY_SECRET_ID}
-                            )
-                            data = resp.json()
-                        if data.get("code") == 0 and data.get("status") == "SUCCESS":
-                            token = await mark_order_paid_once(order_id, res['product'])
-                            if token:
-                                return no_store_json({"status": "paid", "link": f"/l/{token}"})
-                    except Exception as e:
-                        logging.error(f"Auto-fallback antilopay error for {order_id}: {e}")
+                    data = await check_antilopay_payment_status(tx_id)
+                    if data and data.get("code") == 0 and data.get("status") == "SUCCESS":
+                        token = await mark_order_paid_once(order_id, res['product'])
+                        if token:
+                            return no_store_json({"status": "paid", "link": f"/l/{token}"})
                 else:
                     try:
                         async with httpx.AsyncClient(timeout=10) as client:
@@ -808,15 +896,8 @@ async def fallback_check(request: Request, order_id: str):
 
     # ========== ПРОВЕРКА ANTILOPAY ==========
     if provider == "antilopay":
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(
-                    f"https://lk.antilopay.com/api/v1/payment/status?payment_id={row['transaction_id']}",
-                    headers={"X-Apay-Secret-Id": ANTILOPAY_SECRET_ID}
-                )
-                data = resp.json()
-        except Exception as e:
-            logging.error(f"Antilopay fallback status error for {order_id}: {e}")
+        data = await check_antilopay_payment_status(row['transaction_id'])
+        if data is None:
             return no_store_json({"status": "pending"})
 
         if data.get("code") == 0 and data.get("status") == "SUCCESS":
