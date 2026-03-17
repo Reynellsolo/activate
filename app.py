@@ -155,6 +155,36 @@ class CreatePaymentRequest(BaseModel):
         return v
 
 # ================== STARTUP / SHUTDOWN ==================
+
+async def verify_critical_indexes(db: Database):
+    """Проверяет наличие критических индексов и пишет CRITICAL при отсутствии."""
+    critical = [
+        (
+            "uq_wallet_referral_bonus_order",
+            "UNIQUE INDEX для защиты от двойных реферальных бонусов",
+        ),
+    ]
+
+    for idx_name, description in critical:
+        try:
+            row = await db.fetch_one(
+                "SELECT 1 FROM pg_indexes WHERE indexname=:name",
+                values={"name": idx_name},
+            )
+        except Exception as e:
+            logging.critical(
+                f"CRITICAL INDEX CHECK FAILED for {idx_name}: {e}. "
+                "Unable to verify referral dedup protection."
+            )
+            continue
+
+        if not row:
+            logging.critical(
+                f"CRITICAL INDEX MISSING: {idx_name} ({description}). "
+                "Referral dedup protection is DISABLED!"
+            )
+
+
 async def periodic_cleanup():
     while True:
         await asyncio.sleep(3600)
@@ -177,6 +207,8 @@ async def startup():
         await cleanup_expired_cabinet_data(database)
     except Exception as e:
         logging.error(f"Cabinet schema init failed: {e}")
+
+    await verify_critical_indexes(database)
     _cleanup_task = asyncio.create_task(periodic_cleanup())
 
 @app.on_event("shutdown")
@@ -338,14 +370,25 @@ async def mark_order_paid_once(order_id: str, product: str):
     async with database.transaction():
         try:
             row = await database.fetch_one(
-                "SELECT status, activation_token, user_id, amount, referral_code, promo_code_used FROM orders WHERE order_id=:oid FOR UPDATE",
+                """
+                SELECT status, activation_token, user_id, amount,
+                       COALESCE(referral_code, promo_code_used) AS referral_code
+                FROM orders
+                WHERE order_id=:oid
+                FOR UPDATE
+                """,
                 values={"oid": order_id}
             )
-        except Exception:
-            row = await database.fetch_one(
-                "SELECT status, activation_token FROM orders WHERE order_id=:oid FOR UPDATE",
-                values={"oid": order_id}
-            )
+        except Exception as e:
+            logging.warning(f"Full SELECT failed for order {order_id}, trying minimal: {e}")
+            try:
+                row = await database.fetch_one(
+                    "SELECT status, activation_token FROM orders WHERE order_id=:oid FOR UPDATE",
+                    values={"oid": order_id}
+                )
+            except Exception as e2:
+                logging.error(f"Even minimal SELECT failed for order {order_id}: {e2}")
+                return None
 
         if not row:
             return None
@@ -358,7 +401,7 @@ async def mark_order_paid_once(order_id: str, product: str):
         # Keep referral attribution from the first locked read to avoid edge races.
         referral_user_id = row.get("user_id")
         referral_amount = row.get("amount")
-        referral_code = row.get("referral_code") or row.get("promo_code_used")
+        referral_code = row.get("referral_code")
 
         token = row.get("activation_token")
         if not token:
@@ -716,8 +759,16 @@ async def check_order(request: Request, order_id: str):
 
     res = dict(res)
 
-    if res['status'] == 'paid' and res['activation_token']:
-        return no_store_json({"status": "paid", "link": f"/l/{res['activation_token']}"})
+    if res['status'] == 'paid':
+        if res['activation_token']:
+            return no_store_json({"status": "paid", "link": f"/l/{res['activation_token']}"})
+
+        token = await mark_order_paid_once(order_id, res['product'])
+        if token:
+            return no_store_json({"status": "paid", "link": f"/l/{token}"})
+
+        logging.error(f"Paid order without activation token in check_order: {order_id}")
+        return no_store_json({"status": "pending"})
 
     created_at = res.get('created_at')
     if created_at and res['status'] in ['created', 'pending']:

@@ -329,12 +329,22 @@ async def withdraw_request(request: Request, payload: WithdrawRequest, authoriza
         raise HTTPException(status_code=400, detail="Минимальная сумма вывода — 500₽")
 
     async with database.transaction():
+        locked = await database.fetch_one(
+            "SELECT id, balance FROM users WHERE id=:uid FOR UPDATE",
+            values={"uid": user["id"]},
+        )
+        if not locked:
+            raise HTTPException(status_code=404, detail="User not found")
+
         pending = await database.fetch_one(
             "SELECT id FROM withdraw_requests WHERE user_id=:uid AND status='new' LIMIT 1",
             values={"uid": user["id"]},
         )
         if pending:
             raise HTTPException(status_code=409, detail="You already have a pending withdrawal")
+
+        if int(locked["balance"] or 0) < payload.amount:
+            raise HTTPException(status_code=400, detail="Insufficient balance")
 
         debited = await database.fetch_one(
             """

@@ -381,6 +381,21 @@
 
     let attempts = 0;
     const maxAttempts = 60;
+    let checkTimeout = null;
+    let waitingInterval = null;
+    let stopped = false;
+
+    function stopPolling() {
+      stopped = true;
+      if (checkTimeout) {
+        clearTimeout(checkTimeout);
+        checkTimeout = null;
+      }
+      if (waitingInterval) {
+        clearInterval(waitingInterval);
+        waitingInterval = null;
+      }
+    }
 
     function isValidOrderId(value) {
       return /^[0-9a-fA-F-]{36}$/.test(value);
@@ -417,6 +432,7 @@
     }
 
     function showSuccess(link) {
+      stopPolling();
       hideAll();
       document.getElementById('success').classList.remove('hidden');
       document.getElementById('activateLink').href = link;
@@ -428,10 +444,36 @@
 
     function showWaiting() {
       hideAll();
+      stopPolling();
       document.getElementById('waiting').classList.remove('hidden');
+
+      stopped = false;
+      let extraAttempts = 0;
+      waitingInterval = setInterval(async () => {
+        extraAttempts++;
+        if (extraAttempts > 20) {
+          clearInterval(waitingInterval);
+          waitingInterval = null;
+          return;
+        }
+
+        try {
+          const res = await fetchJsonNoCache(`/api/check-order/${encodeURIComponent(orderId)}`);
+          if (!res.ok) return;
+          const data = await res.json().catch(() => ({}));
+          if (data.status === 'paid' && data.link) {
+            clearInterval(waitingInterval);
+            waitingInterval = null;
+            showSuccess(data.link);
+          }
+        } catch (e) {
+          console.warn('waiting interval check error:', e);
+        }
+      }, 30000);
     }
 
     function showError() {
+      stopPolling();
       hideAll();
       document.getElementById('error').classList.remove('hidden');
     }
@@ -449,6 +491,7 @@
     }
 
     async function checkStatus() {
+      if (stopped) return;
       attempts++;
 
       const counter = document.getElementById('attemptCounter');
@@ -478,19 +521,23 @@
           return;
         }
 
-        setTimeout(checkStatus, 1000);
+        const delay = attempts < 30 ? 2000 : 4000;
+        checkTimeout = setTimeout(checkStatus, delay);
       } catch (e) {
         console.error('checkStatus error:', e);
 
         if (attempts >= maxAttempts) {
           showWaiting();
         } else {
-          setTimeout(checkStatus, 1000);
+          const delay = attempts < 30 ? 2000 : 4000;
+          checkTimeout = setTimeout(checkStatus, delay);
         }
       }
     }
 
     async function runFallback(btn) {
+      stopPolling();
+
       if (!orderId || !isValidOrderId(orderId)) {
         showError();
         return;
@@ -542,7 +589,8 @@
       showError();
     } else {
       showOrderId();
-      checkStatus();
+      // Даём webhook время дойти до сервера после редиректа
+      checkTimeout = setTimeout(checkStatus, 3000);
     }
   </script>
 </body>
