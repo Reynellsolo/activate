@@ -315,3 +315,50 @@ async def process_referral_bonus(database: Database, user_id: int, order_amount:
             pass
 
     return bonus
+
+async def reject_withdraw_request(database: Database, withdraw_request_id: int) -> bool:
+    """Отклоняет заявку на вывод с атомарным возвратом баланса и записью транзакции."""
+    async with database.transaction():
+        row = await database.fetch_one(
+            """
+            SELECT id, user_id, amount
+            FROM withdraw_requests
+            WHERE id=:wid AND status='new'
+            FOR UPDATE
+            """,
+            values={"wid": int(withdraw_request_id)},
+        )
+        if not row:
+            return False
+
+        row = dict(row)
+
+        updated = await database.execute(
+            """
+            UPDATE withdraw_requests
+            SET status='rejected', processed_at=NOW()
+            WHERE id=:wid AND status='new'
+            """,
+            values={"wid": int(withdraw_request_id)},
+        )
+        if not updated:
+            return False
+
+        await database.execute(
+            "UPDATE users SET balance = balance + :amount WHERE id=:uid",
+            values={"amount": int(row["amount"]), "uid": int(row["user_id"])},
+        )
+
+        await database.execute(
+            """
+            INSERT INTO wallet_transactions(user_id, tx_type, amount, meta_json)
+            VALUES(:uid, 'withdraw_rejected', :amount, :meta)
+            """,
+            values={
+                "uid": int(row["user_id"]),
+                "amount": int(row["amount"]),
+                "meta": json.dumps({"withdraw_request_id": int(withdraw_request_id)}, ensure_ascii=False),
+            },
+        )
+
+    return True
