@@ -1,0 +1,13 @@
+[0;1;31m●[0m activate.service - Activate Service
+     Loaded: loaded (/etc/systemd/system/activate.service; enabled; vendor preset: enabled)
+     Active: [0;1;31mfailed[0m (Result: exit-code) since Wed 2026-02-25 22:06:03 UTC; 23s ago
+    Process: 84831 ExecStart=/opt/activate/venv/bin/uvicorn app:app --host 127.0.0.1 --port 5000 [0;1;31m(code=exited, status=1/FAILURE)[0m
+   Main PID: 84831 (code=exited, status=1/FAILURE)
+
+Feb 25 22:06:02 ruvds-xwez8 systemd[1]: [0;1;39m[0;1;31m[0;1;39mactivate.service: Main process exited, code=exited, status=1/FAILURE[0m
+Feb 25 22:06:02 ruvds-xwez8 systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mactivate.service: Failed with result 'exit-code'.[0m
+Feb 25 22:06:03 ruvds-xwez8 systemd[1]: activate.service: Scheduled restart job, restart counter is at 5.
+Feb 25 22:06:03 ruvds-xwez8 systemd[1]: Stopped Activate Service.
+Feb 25 22:06:03 ruvds-xwez8 systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mactivate.service: Start request repeated too quickly.[0m
+Feb 25 22:06:03 ruvds-xwez8 systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mactivate.service: Failed with result 'exit-code'.[0m
+Feb 25 22:06:03 ruvds-xwez8 systemd[1]: [0;1;31m[0;1;39m[0;1;31mFailed to start Activate Service.[0m

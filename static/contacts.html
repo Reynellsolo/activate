@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Контакты — CodeNext</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <!-- Скрипт авто-выбора темы -->
+  <script>
+    (function(){
+      const saved = localStorage.getItem('theme');
+      const sys = window.matchMedia('(prefers-color-scheme: light)').matches;
+      if(saved === 'light' || (!saved && sys)){
+        document.documentElement.setAttribute('data-theme', 'light');
+      }
+    })();
+  </script>
+  <style>
+    :root {
+      --bg: #050508;
+      --card: rgba(255,255,255,0.04);
+      --card-hover: rgba(255,255,255,0.08);
+      --card-border: rgba(255,255,255,0.1);
+      --card-border-hover: rgba(255,255,255,0.2);
+      --text: #ffffff;
+      --text-secondary: #e4e4e7;
+      --muted: rgba(255,255,255,0.6);
+      --accent: #818cf8;
+      --accent2: #a78bfa;
+      --accent-rgb: 129,140,248;
+      --accent-light: rgba(129,140,248,0.15);
+      --accent-glow: rgba(129,140,248,0.5);
+      --green: #34d399;
+      --green-rgb: 52,211,153;
+    }
+
+    [data-theme="light"] {
+      --bg: #f5f5f7;
+      --card: rgba(255,255,255,0.9);
+      --card-hover: rgba(255,255,255,1);
+      --card-border: rgba(0,0,0,0.1);
+      --card-border-hover: rgba(0,0,0,0.15);
+      --text: #1a1a1a;
+      --text-secondary: #2d2d2d;
+      --muted: #555555;
+      --accent: #6366f1;
+      --accent2: #8b5cf6;
+      --accent-rgb: 99,102,241;
+      --accent-light: rgba(99,102,241,0.12);
+      --accent-glow: rgba(99,102,241,0.4);
+      --green: #059669;
+      --green-rgb: 5,150,105;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+      transition: background 0.5s ease, color 0.3s ease;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      background:
+        radial-gradient(ellipse 120% 80% at 50% -20%, rgba(var(--accent-rgb), 0.3), transparent 50%),
+        radial-gradient(ellipse 80% 60% at 90% 50%, rgba(167,139,250,0.15), transparent 50%),
+        radial-gradient(ellipse 80% 60% at 10% 80%, rgba(var(--green-rgb), 0.1), transparent 50%);
+      animation: bgPulse 10s ease-in-out infinite alternate;
+    }
+
+    [data-theme="light"] body::before { opacity: 0.5; }
+
+    @keyframes bgPulse {
+      0% { opacity: 1; transform: scale(1); }
+      100% { opacity: 0.8; transform: scale(1.05); }
+    }
+
+    .orb {
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(80px);
+      z-index: -1;
+      animation: orbFloat 20s ease-in-out infinite;
+      pointer-events: none;
+    }
+
+    .orb-1 { width: 600px; height: 600px; background: rgba(var(--accent-rgb), 0.15); top: -200px; left: -200px; }
+    .orb-2 { width: 500px; height: 500px; background: rgba(167,139,250,0.1); top: 50%; right: -200px; animation-delay: -5s; }
+    .orb-3 { width: 400px; height: 400px; background: rgba(var(--green-rgb), 0.1); bottom: -100px; left: 30%; animation-delay: -10s; }
+
+    [data-theme="light"] .orb { opacity: 0.4; }
+
+    @keyframes orbFloat {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      25% { transform: translate(30px, 30px) scale(1.05); }
+      50% { transform: translate(-20px, 50px) scale(0.95); }
+      75% { transform: translate(40px, -20px) scale(1.02); }
+    }
+
+    .particles { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
+
+    .particle {
+      position: absolute;
+      width: 3px;
+      height: 3px;
+      background: rgba(var(--accent-rgb), 0.6);
+      border-radius: 50%;
+      animation: particleFloat 20s linear infinite;
+      box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.3);
+    }
+
+    [data-theme="light"] .particle { opacity: 0.5; }
+
+    @keyframes particleFloat {
+      0% { transform: translateY(100vh); opacity: 0; }
+      10% { opacity: 1; }
+      90% { opacity: 1; }
+      100% { transform: translateY(-100vh); opacity: 0; }
+    }
+
+    a { color: inherit; text-decoration: none; }
+    .container { max-width: 800px; margin: 0 auto; padding: 32px 24px 80px; }
+
+    /* TOPBAR */
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 0;
+      margin-bottom: 48px;
+    }
+
+    .brand { display: flex; align-items: center; gap: 14px; cursor: pointer; }
+
+    .logo {
+      width: 52px;
+      height: 52px;
+      border-radius: 16px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      font-weight: 900;
+      color: #fff;
+      box-shadow: 0 0 40px var(--accent-glow);
+      position: relative;
+      animation: logoPulse 3s ease-in-out infinite;
+      transition: transform 0.3s ease;
+    }
+
+    .logo:hover { transform: scale(1.1) rotate(-5deg); }
+
+    @keyframes logoPulse {
+      0%, 100% { box-shadow: 0 0 40px var(--accent-glow); }
+      50% { box-shadow: 0 0 60px var(--accent-glow), 0 0 100px rgba(var(--accent-rgb), 0.4); }
+    }
+
+    .logo::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: 16px;
+      background: linear-gradient(135deg, rgba(255,255,255,0.3), transparent 60%);
+    }
+
+    .logo span { position: relative; z-index: 1; font-family: monospace; }
+
+    .brand-title .name { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.5px; }
+    .brand-title .tag { font-size: 13px; color: var(--muted); font-weight: 500; margin-top: 2px; }
+
+    .top-actions { display: flex; gap: 12px; align-items: center; }
+
+    .pill {
+      padding: 12px 20px;
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: 100px;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--muted);
+      transition: all 0.3s ease;
+    }
+
+    [data-theme="light"] .pill { background: #fff; }
+
+    .pill:hover {
+      background: var(--card-hover);
+      border-color: var(--accent);
+      color: var(--text);
+      transform: translateY(-2px);
+    }
+
+    .theme-btn {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 20px;
+      transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+
+    [data-theme="light"] .theme-btn { background: #fff; }
+
+    .theme-btn:hover {
+      background: var(--accent-light);
+      border-color: var(--accent);
+      transform: scale(1.15) rotate(180deg);
+      box-shadow: 0 0 30px var(--accent-glow);
+    }
+
+    /* PAGE HEADER */
+    .page-header {
+      text-align: center;
+      margin-bottom: 48px;
+    }
+
+    .page-header h1 {
+      font-size: clamp(32px, 6vw, 48px);
+      font-weight: 900;
+      letter-spacing: -2px;
+      margin-bottom: 16px;
+      color: var(--text);
+    }
+
+    .page-header h1 .gradient {
+      background: linear-gradient(135deg, var(--accent), var(--accent2), var(--green), var(--accent));
+      background-size: 300% auto;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: gradientFlow 4s linear infinite;
+    }
+
+    @keyframes gradientFlow {
+      0% { background-position: 0% center; }
+      100% { background-position: 300% center; }
+    }
+
+    .page-header p {
+      font-size: 18px;
+      color: var(--muted);
+      max-width: 500px;
+      margin: 0 auto;
+    }
+
+    /* CARD */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: 28px;
+      padding: 48px;
+      transition: all 0.4s ease;
+      margin-bottom: 32px;
+    }
+
+    [data-theme="light"] .card {
+      background: #fff;
+      box-shadow: 0 4px 30px rgba(0,0,0,0.08);
+    }
+
+    .card:hover {
+      border-color: var(--card-border-hover);
+    }
+
+    .card h2 {
+      font-size: 24px;
+      font-weight: 800;
+      margin-bottom: 32px;
+      letter-spacing: -0.5px;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .card h2::before {
+      content: "";
+      width: 5px;
+      height: 28px;
+      border-radius: 3px;
+      background: linear-gradient(180deg, var(--accent), var(--accent2));
+    }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 20px 0;
+      border-bottom: 1px solid var(--card-border);
+      transition: all 0.3s ease;
+    }
+
+    .row:last-child { border-bottom: none; }
+
+    .row:hover {
+      padding-left: 12px;
+      background: var(--accent-light);
+      margin: 0 -16px;
+      padding-right: 28px;
+      padding-left: 28px;
+      border-radius: 12px;
+    }
+
+    .label {
+      color: var(--muted);
+      font-size: 15px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .label-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      background: var(--card-hover);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      transition: all 0.3s ease;
+    }
+
+    [data-theme="light"] .label-icon {
+      background: #f0f0f5;
+    }
+
+    .row:hover .label-icon {
+      background: var(--accent-light);
+      transform: scale(1.1);
+    }
+
+    .val {
+      font-weight: 600;
+      text-align: right;
+      color: var(--text);
+      font-size: 15px;
+    }
+
+    .val a {
+      color: var(--accent);
+      transition: all 0.3s ease;
+    }
+
+    .val a:hover {
+      text-decoration: underline;
+    }
+
+    /* BACK LINK */
+    .back-section {
+      text-align: center;
+    }
+
+    .back {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 14px 24px;
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: 100px;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 500;
+      transition: all 0.3s ease;
+    }
+
+    [data-theme="light"] .back { background: #fff; }
+
+    .back:hover {
+      background: var(--accent-light);
+      border-color: var(--accent);
+      color: var(--text);
+      transform: translateY(-2px);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+    }
+
+    /* FOOTER */
+    footer {
+      text-align: center;
+      padding: 48px 0;
+      border-top: 1px solid var(--card-border);
+      margin-top: 48px;
+    }
+
+    footer .copy { color: var(--muted); font-size: 14px; margin-bottom: 20px; }
+
+    .footer-links { display: flex; justify-content: center; gap: 32px; flex-wrap: wrap; }
+    .footer-links a { color: var(--muted); font-size: 14px; font-weight: 500; transition: color 0.3s; }
+    .footer-links a:hover { color: var(--accent); }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(40px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .topbar { animation: fadeUp 0.5s ease both; }
+    .page-header { animation: fadeUp 0.6s ease 0.1s both; }
+    .card { animation: fadeUp 0.6s ease 0.2s both; }
+    .back-section { animation: fadeUp 0.6s ease 0.3s both; }
+
+    @media (max-width: 768px) {
+      .container { padding: 20px 16px 60px; }
+      .topbar { flex-direction: column; gap: 16px; text-align: center; }
+      .top-actions { width: 100%; justify-content: center; }
+      .card { padding: 32px 24px; }
+      .page-header h1 { font-size: 32px; }
+      .row { flex-direction: column; align-items: flex-start; gap: 8px; }
+      .row:hover { padding-left: 16px; padding-right: 16px; margin: 0 -8px; }
+      .val { text-align: left; }
+      .footer-links { gap: 20px; }
+      .orb { display: none; }
+    }
+
+    @media (max-width: 380px) {
+      .card { padding: 24px 20px; }
+      .page-header h1 { font-size: 28px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="orb orb-1"></div>
+  <div class="orb orb-2"></div>
+  <div class="orb orb-3"></div>
+  <div class="particles" id="particles"></div>
+
+  <div class="container">
+    <nav class="topbar">
+      <a href="/" class="brand">
+        <div class="logo"><span>&lt;/&gt;</span></div>
+        <div class="brand-title">
+          <div class="name">CodeNext</div>
+          <div class="tag">Премиум подписки ChatGPT</div>
+        </div>
+      </a>
+      <div class="top-actions">
+        <a class="pill" href="https://t.me/CodeNext_support" target="_blank">💬 Поддержка</a>
+        <button class="theme-btn" id="themeToggle" title="Сменить тему">🌙</button>
+      </div>
+    </nav>
+
+    <div class="page-header">
+      <h1>Наши <span class="gradient">контакты</span></h1>
+      <p>Свяжитесь с нами любым удобным способом</p>
+    </div>
+
+    <div class="card">
+      <h2>Контактная информация</h2>
+      
+      <div class="row">
+        <div class="label">
+          <span class="label-icon">💬</span>
+          Поддержка
+        </div>
+        <div class="val"><a href="https://t.me/CodeNext_support" target="_blank">@CodeNext_support</a></div>
+      </div>
+      
+      <div class="row">
+        <div class="label">
+          <span class="label-icon">📧</span>
+          Email
+        </div>
+        <div class="val">support@codenext.ru</div>
+      </div>
+
+      <div class="row">
+        <div class="label">
+          <span class="label-icon">🏢</span>
+          Организация
+        </div>
+        <div class="val">ИП ПАНЬШИНА КСЕНИЯ СЕРГЕЕВНА</div>
+      </div>
+
+      <div class="row">
+        <div class="label">
+          <span class="label-icon">📋</span>
+          ИНН
+        </div>
+        <div class="val">662342902553</div>
+      </div>
+
+      <div class="row">
+        <div class="label">
+          <span class="label-icon">📄</span>
+          ОГРНИП
+        </div>
+        <div class="val">325665800144567</div>
+      </div>
+
+      <div class="row">
+        <div class="label">
+          <span class="label-icon">📍</span>
+          Адрес
+        </div>
+        <div class="val">622049, г. Нижний Тагил, ул. Удовенко, д. 6</div>
+      </div>
+    </div>
+    
+    <div class="back-section">
+      <a class="back" href="/">← Вернуться на главную</a>
+    </div>
+
+    <footer>
+      <div class="copy">© 2026 CodeNext. Все права защищены.</div>
+      <div class="footer-links">
+        <a href="/refund">Возврат средств</a>
+        <a href="/privacy">Конфиденциальность</a>
+        <a href="/offer">Оферта</a>
+        <a href="https://t.me/CodeNext_support" target="_blank">Поддержка</a>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    // Particles
+    const particlesEl = document.getElementById('particles');
+    for (let i = 0; i < 30; i++) {
+      const p = document.createElement('div');
+      p.className = 'particle';
+      p.style.left = Math.random() * 100 + '%';
+      p.style.animationDelay = Math.random() * 20 + 's';
+      p.style.animationDuration = (15 + Math.random() * 15) + 's';
+      p.style.width = (2 + Math.random() * 3) + 'px';
+      p.style.height = p.style.width;
+      particlesEl.appendChild(p);
+    }
+
+    // Theme
+    const themeBtn = document.getElementById('themeToggle');
+    const html = document.documentElement;
+    function updateIcon() {
+      themeBtn.textContent = html.getAttribute('data-theme') === 'light' ? '☀️' : '🌙';
+    }
+    updateIcon();
+    themeBtn.addEventListener('click', () => {
+      const next = html.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+      updateIcon();
+    });
+  </script>
+</body>
+</html>

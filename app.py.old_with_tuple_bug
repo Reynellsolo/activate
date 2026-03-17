@@ -1,0 +1,627 @@
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from pydantic import BaseModel, Field, validator
+import os, json, secrets, asyncio, uuid
+from databases import Database
+import psycopg2
+from sqlalchemy import create_engine, text
+import sqlite3
+import hashlib
+import httpx
+import re
+import time
+import logging
+from nitro_api import run_flow
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.WARNING,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+# ================== НАСТРОЙКИ PLATEGA ==================
+PLATEGA_MERCHANT_ID = os.getenv("PLATEGA_MERCHANT_ID", "").strip()
+PLATEGA_SECRET = os.getenv("PLATEGA_SECRET", "").strip()
+DOMAIN = os.getenv("DOMAIN", os.getenv("PUBLIC_BASE_URL", "https://codenext.ru")).strip()
+# =======================================================
+
+SUPPORT_LINK = "https://t.me/CodeNext_support"
+MAX_ATTEMPTS = 3
+
+# ===== FALLBACK SETTINGS (anti-spam + validation) =====
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_FALLBACK_LAST_CHECK = {}
+_FALLBACK_MIN_INTERVAL = 10
+# ======================================================
+
+app = FastAPI()
+
+# ✅ Rate Limiting
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+BASE_DIR = "/opt/activate"
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+DATABASE_URL = os.getenv("DATABASE_URL")
+database = Database(DATABASE_URL)
+
+CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS promo_codes (
+  code TEXT PRIMARY KEY,
+  product TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'free',
+  reserved_at TEXT,
+  used_at TEXT,
+  last_error TEXT
+);
+CREATE TABLE IF NOT EXISTS activation_links (
+  token TEXT PRIMARY KEY,
+  product TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  cdk_code TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS orders (
+  order_id TEXT PRIMARY KEY,
+  product TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'created',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  paid_at TEXT,
+  activation_token TEXT,
+  transaction_id TEXT
+);
+CREATE TABLE IF NOT EXISTS platega_webhooks (
+  transaction_id TEXT PRIMARY KEY,
+  received_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+# ✅ Pydantic модель для валидации платежей
+class CreatePaymentRequest(BaseModel):
+    product: str = Field(..., max_length=50)
+    method: str = Field(default="card", max_length=20)
+    
+    @validator('product')
+    def validate_product(cls, v):
+        allowed = ["plus_1m", "go_12m", "plus_12m"]
+        if v not in allowed:
+            raise ValueError('Invalid product')
+        return v
+    
+    @validator('method')
+    def validate_method(cls, v):
+        allowed = ["sbp", "card", "crypto"]
+        v = v.lower().strip()
+        if v not in allowed:
+            return "card"
+        return v
+
+async def init_db():
+    async with database:
+        # Таблицы уже созданы в PostgreSQL
+
+        # мягкая миграция для старой БД
+        try:
+            await database.execute("ALTER TABLE orders ADD COLUMN transaction_id TEXT")
+        except Exception:
+            pass
+
+        try:
+            await database.execute("ALTER TABLE orders ADD COLUMN activation_token TEXT")
+        except Exception:
+            pass
+
+        try:
+            await database.execute("ALTER TABLE orders ADD COLUMN paid_at TEXT")
+        except Exception:
+            pass
+
+        # await db.commit()  # Not needed in databases library
+
+async def get_link(token: str):
+    async with database:
+        cur = await database.execute(
+            "SELECT token, product, status, attempts, cdk_code, last_error "
+            "FROM activation_links WHERE token=?", (token,)
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        return {
+            "token": row[0], "product": row[1], "status": row[2],
+            "attempts": int(row[3] or 0), "cdk_code": row[4], "last_error": row[5],
+        }
+
+async def inc_attempt(token: str, err: str):
+    async with database:
+        await database.execute(
+            "UPDATE activation_links SET attempts=attempts+1, last_error=? WHERE token=?",
+            (str(err)[:500], token)
+        )
+        # await db.commit()  # Not needed in databases library
+
+async def set_link_status(token: str, status: str):
+    async with database:
+        await database.execute("UPDATE activation_links SET status=$1 WHERE token=$2", (status, token))
+        # await db.commit()  # Not needed in databases library
+
+async def attach_cdk(token: str, code: str):
+    async with database:
+        await database.execute("UPDATE activation_links SET cdk_code=$1 WHERE token=$2", (code, token))
+        # await db.commit()  # Not needed in databases library
+
+async def create_link(product: str) -> str:
+    token = secrets.token_urlsafe(16)
+    async with database:
+        await database.execute(
+            "INSERT INTO activation_links(token,product,status,attempts) VALUES(?,?,'active',0)",
+            (token, product)
+        )
+        # await db.commit()  # Not needed in databases library
+    return token
+
+async def reserve_one_cdk(product: str):
+    async with database:
+        await database.execute("BEGIN IMMEDIATE")
+        cur = await database.execute(
+            "SELECT code FROM promo_codes WHERE product=? AND status='free' LIMIT 1",
+            (product,)
+        )
+        row = await cur.fetchone()
+        if not row:
+            await database.execute("COMMIT")
+            return None
+        code = row[0]
+        await database.execute(
+            "UPDATE promo_codes SET status='reserved', reserved_at=datetime('now') WHERE code=?",
+            (code,)
+        )
+        # await db.commit()  # Not needed in databases library
+        return code
+
+async def mark_cdk_used(code: str):
+    async with database:
+        await database.execute(
+            "UPDATE promo_codes SET status='used', used_at=datetime('now'), last_error=NULL WHERE code=?",
+            (code,)
+        )
+        # await db.commit()  # Not needed in databases library
+
+async def mark_cdk_bad(code: str, err: str):
+    async with database:
+        await database.execute(
+            "UPDATE promo_codes SET status='bad', last_error=? WHERE code=?",
+            (str(err)[:500], code)
+        )
+        # await db.commit()  # Not needed in databases library
+
+@app.on_event("startup")
+async def startup():
+    await init_db()
+
+@app.get("/")
+def index():
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+@app.get("/success")
+def success_page():
+    return FileResponse(os.path.join(STATIC_DIR, "success.html"))
+
+@app.get("/blocked")
+def blocked_page():
+    return FileResponse(os.path.join(STATIC_DIR, "blocked.html"))
+
+@app.get("/error")
+def error_page():
+    return FileResponse(os.path.join(STATIC_DIR, "error.html"))
+
+@app.get("/refund")
+def refund_page():
+    return FileResponse(os.path.join(STATIC_DIR, "refund.html"))
+
+@app.get("/privacy")
+def privacy_page():
+    return FileResponse(os.path.join(STATIC_DIR, "privacy.html"))
+
+@app.get("/offer")
+def offer_page():
+    return FileResponse(os.path.join(STATIC_DIR, "offer.html"))
+
+@app.get("/payment-success")
+def payment_success_page():
+    return FileResponse(os.path.join(STATIC_DIR, "payment_success.html"))
+
+@app.get("/contacts")
+def contacts_page():
+    return FileResponse(os.path.join(STATIC_DIR, "contacts.html"))
+
+@app.get("/l/{token}")
+async def link_page(token: str):
+    link = await get_link(token)
+    if not link:
+        return RedirectResponse("/error")
+    if link["status"] == "used":
+        return RedirectResponse("/success")
+    if link["status"] == "blocked":
+        return RedirectResponse("/blocked")
+    if link["attempts"] >= MAX_ATTEMPTS:
+        await set_link_status(token, "blocked")
+        return RedirectResponse("/blocked")
+    return FileResponse(os.path.join(STATIC_DIR, "activate.html"))
+
+@app.get("/api/link/{token}")
+async def api_link_info(token: str):
+    link = await get_link(token)
+    if not link:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {
+        "product": link["product"],
+        "status": link["status"],
+        "attempts": link["attempts"],
+        "max_attempts": MAX_ATTEMPTS,
+    }
+
+# ================== PLATEGA: ОПЛАТА ==================
+@app.post("/create-payment")
+@limiter.limit("5/minute")
+async def create_payment(request: Request, payload: CreatePaymentRequest):
+    product = payload.product
+    method = payload.method
+
+    prices = {"plus_1m": 1490, "go_12m": 1990, "plus_12m": 6990}
+    
+    if not PLATEGA_MERCHANT_ID or not PLATEGA_SECRET:
+        logging.error("Platega credentials not configured")
+        return JSONResponse({"error": "Платёжная система не настроена"}, status_code=500)
+
+    method_map = {
+        "sbp": 2,
+        "card": 11,
+        "crypto": 13,
+    }
+    
+    payment_method_int = method_map.get(method, 11)
+
+    amount = prices[product]
+    order_id = str(uuid.uuid4())
+
+    async with database:
+        await database.execute(
+            "INSERT INTO orders(order_id, product, amount, status) VALUES(?,?,?,'created')",
+            (order_id, product, amount)
+        )
+        # await db.commit()  # Not needed in databases library
+
+    url = "https://app.platega.io/transaction/process"
+
+    data = {
+        "paymentMethod": payment_method_int,
+        "paymentDetails": {"amount": amount, "currency": "RUB"},
+        "description": f"Подписка {product}",
+        "return": f"{DOMAIN}/payment-success?order_id={order_id}",
+        "failedUrl": f"{DOMAIN}/?payment=failed",
+        "payload": order_id,
+    }
+
+    headers = {
+        "X-MerchantId": PLATEGA_MERCHANT_ID,
+        "X-Secret": PLATEGA_SECRET,
+        "Content-Type": "application/json",
+        "accept": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(url, json=data, headers=headers)
+
+        if resp.status_code >= 400:
+            logging.error(f"Platega error [{resp.status_code}]: {resp.text}")
+            return JSONResponse({"error": "Ошибка создания платежа"}, status_code=500)
+
+        res_json = resp.json()
+    except httpx.TimeoutException:
+        logging.error("Platega timeout")
+        return JSONResponse({"error": "Таймаут платёжной системы"}, status_code=504)
+    except Exception as e:
+        logging.error(f"Payment exception: {e}")
+        return JSONResponse({"error": "Ошибка соединения"}, status_code=500)
+
+    pay_url = res_json.get("redirect")
+    transaction_id = res_json.get("transactionId")
+
+    if not pay_url:
+        logging.error(f"Platega no redirect: {res_json}")
+        return JSONResponse({"error": "Не получен URL оплаты"}, status_code=500)
+
+    if transaction_id:
+        async with database:
+            await database.execute(
+                "UPDATE orders SET transaction_id=? WHERE order_id=?",
+                (transaction_id, order_id)
+            )
+            # await db.commit()  # Not needed in databases library
+
+    return {"payment_url": pay_url, "order_id": order_id}
+
+@app.get("/api/check-order/{order_id}")
+@limiter.limit("20/minute")
+async def check_order(request: Request, order_id: str):
+    async with database:
+        cur = await database.execute("SELECT status, activation_token FROM orders WHERE order_id=$1", (order_id,))
+        row = await cur.fetchone()
+        if not row:
+            return JSONResponse({"error": "not found"}, status_code=404)
+
+        status, token = row
+        if status == 'paid' and token:
+            return {"status": "paid", "link": f"/l/{token}"}
+        return {"status": status}
+
+# ================== PLATEGA: FALLBACK ==================
+@app.get("/api/fallback-check/{order_id}")
+@limiter.limit("6/minute")
+async def fallback_check(request: Request, order_id: str):
+    if not UUID_RE.match(order_id):
+        logging.warning(f"Invalid order_id format from {request.client.host}: {order_id}")
+        return JSONResponse({"error": "bad order_id"}, status_code=400)
+
+    now = int(time.time())
+    last = _FALLBACK_LAST_CHECK.get(order_id, 0)
+    if now - last < _FALLBACK_MIN_INTERVAL:
+        return {"status": "cooldown"}
+    _FALLBACK_LAST_CHECK[order_id] = now
+
+    async with database:
+        cur = await database.execute(
+            "SELECT status, activation_token, transaction_id, product FROM orders WHERE order_id=?",
+            (order_id,)
+        )
+        row = await cur.fetchone()
+        if not row:
+            return JSONResponse({"error": "not found"}, status_code=404)
+
+        status, activation_token, transaction_id, product = row
+
+        if status == "paid" and activation_token:
+            return {"status": "paid", "link": f"/l/{activation_token}"}
+
+        if not transaction_id:
+            return {"status": status}
+
+    url = f"https://app.platega.io/transaction/{transaction_id}"
+    headers = {
+        "X-MerchantId": PLATEGA_MERCHANT_ID,
+        "X-Secret": PLATEGA_SECRET,
+        "accept": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, headers=headers)
+        if resp.status_code >= 400:
+            return {"status": "pending"}
+        data = resp.json()
+    except Exception:
+        return {"status": "pending"}
+
+    if str(data.get("status", "")).upper() != "CONFIRMED":
+        return {"status": "pending"}
+
+    token = await create_link(product)
+
+    async with database:
+        await database.execute(
+            "UPDATE orders SET status='paid', paid_at=datetime('now'), activation_token=? WHERE order_id=?",
+            (token, order_id)
+        )
+        # await db.commit()  # Not needed in databases library
+
+    return {"status": "paid", "link": f"/l/{token}"}
+
+# ================== PLATEGA: WEBHOOK ==================
+@app.post("/webhook/platega_bbb5ee3f3d5bbc4ed3b6aa02")
+async def platega_webhook(request: Request):
+    # Allow Platega webhook URL check
+    ua = (request.headers.get("User-Agent") or "")
+    if ua.startswith("Platega-CallbackUrlCheck"):
+        return {"ok": True}
+
+    if request.headers.get("X-MerchantId") != PLATEGA_MERCHANT_ID:
+        logging.warning(f"Webhook auth fail (merchant) from {request.client.host}")
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if request.headers.get("X-Secret") != PLATEGA_SECRET:
+        logging.warning(f"Webhook auth fail (secret) from {request.client.host}")
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        payload = await request.json()
+    except Exception:
+        form = await request.form()
+        payload = dict(form)
+
+    transaction_id = payload.get("id") or payload.get("transactionId")
+    status = str(payload.get("status", "")).upper()
+
+    if status != "CONFIRMED":
+        return "OK"
+
+    if not transaction_id:
+        logging.warning(f"Platega webhook missing transaction id: {payload}")
+        return "OK"
+
+    # ✅ Idempotency check
+    try:
+        async with database:
+            await database.execute(
+                "INSERT INTO platega_webhooks(transaction_id) VALUES (?)",
+                (str(transaction_id),)
+            )
+            # await db.commit()  # Not needed in databases library
+    except sqlite3.IntegrityError:
+        return "OK"
+    except Exception as e:
+        logging.error(f"Platega webhook DB error: {repr(e)}")
+        return JSONResponse({"error": "server_error"}, status_code=500)
+
+    async with database:
+        cur = await database.execute(
+            "SELECT order_id, status, product FROM orders WHERE transaction_id=?",
+            (str(transaction_id),)
+        )
+        row = await cur.fetchone()
+        if not row:
+            logging.warning(f"Platega webhook unknown transaction: {transaction_id}")
+            return "OK"
+
+        order_id, cur_status, product = row
+        if cur_status == "paid":
+            return "OK"
+
+        token = await create_link(product)
+        await database.execute(
+            "UPDATE orders SET status=\"paid\", paid_at=datetime(\"now\"), activation_token=? WHERE order_id=?",
+            (token, order_id)
+        )
+        # await db.commit()  # Not needed in databases library
+
+    return "OK"
+
+# ================== АКТИВАЦИЯ ==================
+@app.post("/activate")
+@limiter.limit("10/minute")
+async def activate_submit(request: Request):
+    try:
+        payload = await request.json()
+    except:
+        return JSONResponse({"error": "Некорректный JSON"}, status_code=400)
+    
+    token = (payload.get("token") or "").strip()
+    auth_json = (payload.get("auth_json") or "").strip()
+
+    if not token or not auth_json:
+        return JSONResponse({"error": "Пожалуйста, вставьте данные и попробуйте снова."}, status_code=400)
+
+    link = await get_link(token)
+    if not link or link["status"] != "active":
+        return JSONResponse({"error": "Данная ссылка недействительна или уже была использована."}, status_code=403)
+
+    if link["attempts"] >= MAX_ATTEMPTS:
+        await set_link_status(token, "blocked")
+        logging.warning(f"Token {token} blocked (max attempts) from {request.client.host}")
+        return JSONResponse({"error": f"Превышен лимит попыток. Поддержка: {SUPPORT_LINK}"}, status_code=403)
+
+    try:
+        parsed = json.loads(auth_json)
+        if not isinstance(parsed, dict):
+            raise ValueError
+    except:
+        await inc_attempt(token, "invalid data")
+        link2 = await get_link(token)
+        if link2 and link2["attempts"] >= MAX_ATTEMPTS:
+            await set_link_status(token, "blocked")
+            return JSONResponse({"error": f"Превышен лимит попыток. Поддержка: {SUPPORT_LINK}"}, status_code=403)
+        rem = MAX_ATTEMPTS - link2["attempts"]
+        return JSONResponse({"error": f"Данные указаны некорректно. Осталось попыток: {rem}"}, status_code=400)
+
+    code = link["cdk_code"]
+    if not code:
+        code = await reserve_one_cdk(link["product"])
+        if not code:
+            return JSONResponse({"error": f"Оформление временно недоступно. Поддержка: {SUPPORT_LINK}"}, status_code=503)
+        await attach_cdk(token, code)
+
+    try:
+        authsession = parsed
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: run_flow(code, authsession))
+    except Exception as e:
+        logging.error(f"Activation error: {e}")
+        return JSONResponse({"error": "Временная техническая ошибка. Попробуйте через минуту."}, status_code=500)
+
+    if result.get("success"):
+        await mark_cdk_used(code)
+        await set_link_status(token, "used")
+        return {"status": "ok", "redirect": "/success"}
+
+    # ✅ ДЕТАЛЬНАЯ ОБРАБОТКА ОШИБОК ОТ NITRO
+    raw_err = result.get("error", "")
+    raw_lower = raw_err.lower()
+
+    # Сетевые ошибки (временные, НЕ увеличиваем попытки)
+    if "network" in raw_lower or "timeout" in raw_lower:
+        return JSONResponse({"error": "Временная ошибка соединения. Повторите через минуту."}, status_code=408)
+
+    # Ошибки которые означают "Данные указаны некорректно"
+    incorrect_data_errors = [
+        "user is invalid",
+        "token is invalid",
+        "access token expired",
+        "authorization failed",
+        "invalid authorization data"
+    ]
+    
+    is_incorrect_data = any(err in raw_lower for err in incorrect_data_errors)
+    
+    if is_incorrect_data:
+        await inc_attempt(token, raw_err)
+        link2 = await get_link(token)
+        
+        if link2 and link2["attempts"] >= MAX_ATTEMPTS:
+            await set_link_status(token, "blocked")
+            return JSONResponse({"error": f"Превышен лимит попыток. Поддержка: {SUPPORT_LINK}"}, status_code=403)
+        
+        rem = MAX_ATTEMPTS - link2["attempts"]
+        return JSONResponse({"error": f"Данные указаны некорректно. Осталось попыток: {rem}"}, status_code=400)
+
+    # CDK уже использован
+    if "cdk already used" in raw_lower:
+        await mark_cdk_bad(code, raw_err)
+        await set_link_status(token, "blocked")
+        logging.error(f"CDK already used: {code}")
+        return JSONResponse({"error": f"Техническая ошибка. Поддержка: {SUPPORT_LINK}"}, status_code=500)
+
+    # Проблема со статусом задачи
+    if "task still pending" in raw_lower:
+        await inc_attempt(token, raw_err)
+        link2 = await get_link(token)
+        
+        if link2 and link2["attempts"] >= MAX_ATTEMPTS:
+            await set_link_status(token, "blocked")
+            return JSONResponse({"error": f"Превышен лимит попыток. Поддержка: {SUPPORT_LINK}"}, status_code=403)
+        
+        rem = MAX_ATTEMPTS - link2["attempts"]
+        return JSONResponse({"error": f"Не удалось проверить статус активации. Повторите попытку. Осталось попыток: {rem}"}, status_code=408)
+
+    # CDK не найден
+    if "not found" in raw_lower and "cdk" in raw_lower:
+        await mark_cdk_bad(code, raw_err)
+        await set_link_status(token, "blocked")
+        logging.error(f"Bad CDK {code}: {raw_err}")
+        return JSONResponse({"error": f"Техническая ошибка. Поддержка: {SUPPORT_LINK}"}, status_code=500)
+
+    # Любая другая ошибка
+    await inc_attempt(token, raw_err)
+    link2 = await get_link(token)
+    
+    if link2 and link2["attempts"] >= MAX_ATTEMPTS:
+        await set_link_status(token, "blocked")
+        return JSONResponse({"error": f"Превышен лимит попыток. Поддержка: {SUPPORT_LINK}"}, status_code=403)
+
+    rem = MAX_ATTEMPTS - link2["attempts"]
+    return JSONResponse({"error": f"Не удалось завершить оформление. Проверьте данные. Осталось попыток: {rem}"}, status_code=400)
